@@ -1,0 +1,194 @@
+#!/usr/bin/env node
+
+// 加载依赖配置
+// 下载远程仓库内容
+const download = require('download-git-repo')
+// 命令行处理工具
+const program = require('commander')
+// node下的文件操作，existsSync - 检测路径是否存在
+const exists = require('fs').existsSync
+// node自带path模块，拼接路径
+const path = require('path')
+// 命令行加载效果
+const ora = require('ora')
+// 获取用户的根目录
+const home = require('user-home')
+// 绝对路径替换成带波浪号
+const tildify = require('tildify')
+// 高亮打印
+const chalk = require('chalk')
+// 用户与脚本的命令行交互
+const inquirer = require('inquirer')
+// rm -rf js版本
+const rm = require('rimraf').sync
+// 打印 - 统一化格式打印
+const logger = require('../lib/logger')
+// 根据模板构建项目 - 
+const generate = require('../lib/generate')
+// 检测当前脚手架版本 - 检查与node的搭配版本 & 是否有可升级版本
+const checkVersion = require('../lib/check-version')
+// 告警 - 废弃版本 / 老版本的提示校验
+const warnings = require('../lib/warnings')
+// 路径处理
+const localPath = require('../lib/local-path')
+
+// 检测本地路径是否正确
+const isLocalPath = localPath.isLocalPath
+// 检测本地模板路径
+const getTemplatePath = localPath.getTemplatePath
+
+/**
+ * Usage 脚手架使用手册
+ */
+// 面试：如何使用本地离线下载好的或者自己预设的模板--offline
+program
+  .usage('<template-name> [project-name]')
+  .option('-c, --clone', 'use git clone')
+  .option('--offline', 'use cached template')
+
+/**
+ * Help. 帮助手册
+ */
+
+program.on('--help', () => {
+  console.log('  Examples:')
+  console.log()
+  console.log(chalk.gray('    # create a new project with an official template'))
+  console.log('    $ vue init webpack my-project')
+  console.log()
+  console.log(chalk.gray('    # create a new project straight from a github template'))
+  console.log('    $ vue init username/repo my-project')
+  console.log()
+})
+
+/**
+ * Help.
+ */
+
+function help () {
+  program.parse(process.argv)
+  if (program.args.length < 1) return program.help()
+}
+help()
+
+/**
+ * Settings. 主要设置
+ */
+// 如何取到program.args
+// 模板名称
+let template = program.args[0]
+// 是否包含斜杠 => 路径层级
+const hasSlash = template.indexOf('/') > -1
+// 项目名
+const rawName = program.args[1]
+// 输入空 => 是否为当前目录文件
+const inPlace = !rawName || rawName === '.'
+// 当前目录名为项目构建目录名 or 是当前目录子目录
+const name = inPlace ? path.relative('../', process.cwd()) : rawName
+const to = path.resolve(rawName || '.')
+const clone = program.clone || false
+
+// 本地目录的拼接
+const tmp = path.join(home, '.vue-templates', template.replace(/[\/:]/g, '-'))
+if (program.offline) {
+  console.log(`> Use cached template at ${chalk.yellow(tildify(tmp))}`)
+  template = tmp
+}
+
+/**
+ * Padding.
+ */
+
+console.log()
+process.on('exit', () => {
+  console.log()
+})
+// 是否当前目录下构建 || 存在传入路径
+if (inPlace || exists(to)) {
+  // 弹出问题，让使用者选择
+  inquirer.prompt([{
+    type: 'confirm',
+    message: inPlace
+      ? 'Generate project in current directory?'
+      : 'Target directory exists. Continue?',
+    name: 'ok'
+  }]).then(answers => {
+    if (answers.ok) {
+      run()
+    }
+  }).catch(logger.fatal)
+} else {
+  run()
+}
+
+/**
+ * Check, download and generate the project.
+ */
+// 主函数
+function run () {
+  // check if template is local
+  // 是否本地路径
+  if (isLocalPath(template)) {
+    // ~/.vue-template/……
+    // 绝对路径
+    const templatePath = getTemplatePath(template)
+    if (exists(templatePath)) {
+      // 本地的模板去生成最终文件项目
+      generate(name, templatePath, to, err => {
+        if (err) logger.fatal(err)
+        console.log()
+        logger.success('Generated "%s".', name)
+      })
+    } else {
+      // 本地模板没找着
+      logger.fatal('Local template "%s" not found.', template)
+    }
+  } else {
+    // 非本地
+    // 检查版本号
+    checkVersion(() => {
+      // 官方 or 第三方
+      if (!hasSlash) {
+        // use official templates
+        const officialTemplate = 'vuejs-templates/' + template
+        // #可用
+        if (template.indexOf('#') !== -1) {
+          downloadAndGenerate(officialTemplate)
+        } else {
+          if (template.indexOf('-2.0') !== -1) {
+            warnings.v2SuffixTemplatesDeprecated(template, inPlace ? '' : name)
+            return
+          }
+
+          // warnings.v2BranchIsNowDefault(template, inPlace ? '' : name)
+          downloadAndGenerate(officialTemplate)
+        }
+      } else {
+        downloadAndGenerate(template)
+      }
+    })
+  }
+}
+
+/**
+ * Download a generate from a template repo.
+ *
+ * @param {String} template
+ */
+
+function downloadAndGenerate (template) {
+  const spinner = ora('downloading template')
+  spinner.start()
+  // Remove if local template exists
+  // 删除本地模板
+  if (exists(tmp)) rm(tmp)
+  download(template, tmp, { clone }, err => {
+    spinner.stop()
+    if (err) logger.fatal('Failed to download repo ' + template + ': ' + err.message.trim())
+    generate(name, tmp, to, err => {
+      if (err) logger.fatal(err)
+      console.log()
+      logger.success('Generated "%s".', name)
+    })
+  })
+}
